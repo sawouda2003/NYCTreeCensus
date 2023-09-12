@@ -1,0 +1,369 @@
+---
+title: "Final Written Report"
+author: "Tiffany Kuo, Salih Awouda, Caroline Klein"
+date: "`r Sys.Date()`"
+embed-resources: true
+format: html
+editor: visual
+---
+
+# NYC Tree Census
+
+### Introduction & data
+
+```{r}
+#| message: false
+library(tidyverse) #loads packages
+library(readxl)
+library(tidymodels)
+library(openintro)
+```
+
+```{r}
+#| message: false
+nyctree <- read_csv("data/2015StreetTreesCensus_TREES.csv") #imports data
+zipcode_income <- read_csv("data/Incomes.csv")
+```
+
+Low-income neighborhoods often lack the same resources available in more privileged areas. One of the disadvantages some of these neighborhoods face is a lack of tree coverage, which deprives them of many psychological and physical benefits. Other studies have found that low-income and minority neighborhoods are disproportionately subject to this lack of trees. For example, one study found that neighborhoods with 90% or more of their residents living in poverty have 41% less tree canopy than communities with only 10% or less of the population in poverty ([Greenwire](https://www.eenews.net/greenwire/stories/1063713865/), Sept. 16, 2020). Trees absorb carbon dioxide and offset the effects of climate change, leaving those with less tree coverage victims of greater heat and pollution. Low-income neighborhoods face a similar issue when they have a larger proportion of unhealthy trees compared to wealthier neighborhoods.
+
+With this research, we hope to reveal potential instances of this inequity in New York City in order to encourage the production of solutions if needed. We will be investigating the question: How are the health of trees affected by the income of the area they are in? We predict that the higher the income of the zipcode region, the healthier the trees will be because the area will have more resources for tree upkeep and protection. The null hypothesis would be that there is no relationship between the income of a neighborhood and the health of its trees.
+
+The primary data we will use is the 2015 NYC Tree Census from [NYC Open Data](https://data.cityofnewyork.us/Environment/2015-Street-Tree-Census-Tree-Data/pi5s-9p35). This census was conducted by volunteers and staff from NYC Parks & Recreation in 2015. These contributors documented every tree in New York City as a row, as well as information about the characteristics of the tree. The key variables we will be analyzing are species, apparent health (categorized as poor, fair, or good), zip code, and presence of stewardship or guards surrounding the tree.
+
+We will also use a data set of the median incomes of different types of households in different zip codes of New York City. This data was collected in 2019 by the U.S. Census Bureau via a community survey, and was found on the website [CCC New York](https://data.cccnewyork.org/data/table/66/median-incomes#66/107/62/a/a). Each row represents a zip code and the value is the median income for a type of household (all households, families, families with children, and families without children) in dollars. We will be using the columns representing zip code and median income for all households.
+
+### Methodology
+
+```{r}
+nyctree <- nyctree %>%
+  drop_na(health) %>% #removes any NAs
+  mutate( #turns health into an ordered factor
+    health_num = case_when(
+      health == "Poor" ~ 1,
+      health == "Fair" ~ 2,
+      health == "Good" ~ 3),
+    #makes a variable to numerically represent health
+    health = factor(x = health, levels = c("Poor", "Fair", "Good"), ordered = TRUE))
+```
+
+```{r}
+#changes variable name for zip code in the zipcode_income dataframe
+zipcode_income <- zipcode_income %>%
+  rename(zip = `Rank / Location`)
+
+#changes variable name for All Household income in the zipcode_income dataframe
+zipcode_income <- zipcode_income %>%
+  rename(all_income = `All Households`)
+```
+
+```{r}
+#converts zip codes to numbers so that they can be joined
+zipcode_income <- zipcode_income  %>%
+  mutate(zip = as.numeric(zip))
+
+nyctree <- nyctree %>%
+  mutate(zipcode = as.numeric(zipcode))
+```
+
+```{r}
+nyctrees <- nyctree %>% #joins the data sets
+  left_join(zipcode_income, by=c("zipcode"="zip"))
+```
+
+```{r}
+median_income = nyctrees %>% #finds median income from tree data
+  summarise(med = median(all_income, na.rm = TRUE)) #evaluates to $70793
+
+median_lower = nyctrees %>%
+  filter(all_income < median_income$med) %>% #finds median income from lower half of tree data
+  summarise(med = median(all_income, na.rm = TRUE)) #evaluates to $54278
+  
+median_upper = nyctrees %>%
+  filter(all_income > median_income$med) %>% #finds median income from upper half of tree data
+  summarise(med = median(all_income, na.rm = TRUE)) #evaluates to $84713
+
+nyctrees <- nyctrees %>%
+  mutate(income_bracket = case_when( #creates 4 equally sized income brackets to sort tree locations into
+    all_income <= median_lower$med ~ "$0-$54278",
+    all_income > median_lower$med & all_income <= median_income$med ~ "$54279-$70793",
+    all_income > median_income$med & all_income <= median_upper$med ~ "$70794-$84713",
+    all_income > median_upper$med ~ "$84714-$250001"
+  ))%>%
+  drop_na(income_bracket)
+```
+
+```{r}
+nyctrees1 <- nyctrees %>% #0 is London planetree, 1 is everything else
+  mutate(type=if_else(spc_common=="London planetree",0,1)) 
+```
+
+```{r}
+nyctrees1 <- nyctrees1 %>% #relevels factor variables for fitted model
+  mutate(steward=fct_relevel(steward, "None", "1or2", "3or4")) %>%
+  mutate(sidewalk=fct_relevel(sidewalk, "NoDamage", "Damage")) %>%
+  mutate(guards=fct_relevel(guards, "None", "Harmful", "Unsure", "Helpful"))
+```
+
+In order to investigate this question, we used the variable in the tree census representing the health of the tree. Trees were categorized as having poor, fair, and good health, which we will quantify as having a score of 1, 2 or 3 when processing the data. The following is a distribution visualization for tree health:
+
+```{r}
+ggplot(nyctree, aes(x = health)) + #plots health of trees in a bar plot
+  geom_bar(fill = "#ADD8E6") +
+  labs(x= "Health", #adds labels
+       y = "Number of Trees",
+       title="Health of Trees in NYC") +
+  theme_minimal() #sets theme
+```
+
+The key variable we will be examining the effect of is the income of the zip code region the tree is in. We will be organizing income into 4 income brackets with an equal number of trees in each category when we process the data. The distribution of these incomes is represented in the following graph:
+
+```{r}
+#| message: false
+ggplot(nyctrees, aes(x = all_income)) + #plots incomes in a histogram
+  geom_histogram(fill = "#301934") +
+  labs(x= "Region Incomes ($)", #adds labels
+       y = "Number of Regions",
+       title= "Income Distribution of Zip Code Regions In NYC") +
+  theme_minimal() #sets theme
+```
+
+The relationship between tree health and income can be seen through this visualization:
+
+```{r}
+ggplot(nyctrees, aes(x = income_bracket, fill = health)) + #plots income vs. tree health
+  geom_bar(position = "fill") +
+  labs(x = "Region Incomes ($)", #adds labels
+       y = "Tree Health",
+       fill = "Health",
+       title = "Health of Trees in Regions of Different Incomes in NYC") +
+  theme_minimal() #sets theme
+```
+
+This plot does not seem to definitively support our hypothesis because the health of the trees appear to have a similar distribution across all zip code income brackets. It appears that for the first 3 income brackets, the number of healthy (Good) trees increases and number of unhealthy (Poor) trees decreases as the region income increases. However, the income range with the most trees of "Good" health and the least trees of "Poor" health is the second wealthiest, not the wealthiest group of zip code regions.
+
+However, to test these apparent results, we will utilize summary statistics to calculate the difference in mean tree health score of each income bracket. We chose this method in order to compare the mean of the lowest income bracket to the mean of the higher income brackets. In this way, we can test our hypothesis that higher income corresponds to better tree health. With $m_l$ representing the mean of the lowest income bracket and $m_h$ representing the means of each of the higher income brackets, the null hypothesis is $H_0: m_h - m_l = 0$ and the alternate hypothesis is $H_A: m_h - m_l > 0$.
+
+```{r}
+#rescales income to be in thousands of dollars
+tree_income <- nyctrees1 %>% 
+  mutate(income_rescale = (all_income / 1000)^2)
+
+#finds mean health score of first income bracket
+tree_health_1 <- tree_income %>% 
+  filter(income_bracket == "$0-$54278") %>% 
+  summarise(mean = mean(health_num, na.rm = TRUE))
+
+#finds mean health score of second income bracket
+tree_health_2 <- tree_income %>% 
+  filter(income_bracket == "$54279-$70793") %>% 
+  summarise(mean = mean(health_num, na.rm = TRUE))
+
+#finds mean health score of third income bracket
+tree_health_3 <- tree_income %>% 
+  filter(income_bracket == "$70794-$84713") %>% 
+  summarise(mean = mean(health_num, na.rm = TRUE))
+
+#finds mean health score of fourth income bracket
+tree_health_4 <- tree_income %>% 
+  filter(income_bracket == "$84714-$250001") %>% 
+  summarise(mean = mean(health_num, na.rm = TRUE))
+
+#calculates difference between first and second income bracket means
+diff_mean12 <- tree_health_2 - tree_health_1
+#calculates difference between first and third income bracket means
+diff_mean13 <- tree_health_3 - tree_health_1
+#calculates difference between first and fourth income bracket means
+diff_mean14 <- tree_health_4 - tree_health_1
+
+#creates a data frame to present mean values
+data.frame(bracket_income = c("$0-$54278", "$54279-$70793", "$70794-$84713", "$84714-$250001"), mean_tree_health = c(tree_health_1$mean, tree_health_2$mean, tree_health_3$mean, tree_health_4$mean)) %>%  
+  knitr::kable(col.names = c("Income Bracket", "Mean Tree Health"))
+
+##creates a data frame to present difference in mean values
+data.frame(diff_bracket_income = c("First and Second Income Bracket", "First and Third Income Bracket3", "First and Fourth Income Bracket"), mean_tree_health = c(diff_mean12$mean, diff_mean13$mean, diff_mean14$mean)) %>% 
+  knitr::kable(col.names = c("Income Bracket", "Difference in Mean Tree Health"))
+```
+
+```{r}
+#| warning: false
+set.seed(144) #sets a seed
+
+#filters to only compare the first and second categories
+tree_income12 <- nyctrees %>%
+  filter(income_bracket == "$0-$54278" | income_bracket == "$54279-$70793")
+
+tree_fit_first <- tree_income12 %>%
+   specify(response = health_num, explanatory = income_bracket) %>% #defines explanatory and outcome variables
+   hypothesize(null = "independence") %>% #we are trying to determine independence
+   generate(reps = 1000, type = "permute") %>% #generates 1000 times randomizing categorical labels
+   calculate(stat = "diff in means") #finds difference in means
+
+p_val_first <- tree_fit_first %>%
+  filter(stat >= diff_mean12) %>% #checks how many stats are more extreme than the actual difference
+  summarise(p_value = n()/nrow(tree_fit_first)) #calculates p-value
+```
+
+```{r}
+#| warning: false
+set.seed(144) #sets a seed
+
+#filters to only compare the first and third categories
+tree_income13 <- nyctrees %>%
+  filter(income_bracket == "$0-$54278" | income_bracket == "$70794-$84713")
+
+tree_fit_sec <- tree_income13 %>%
+   specify(response = health_num, explanatory = income_bracket) %>% #defines explanatory and response variables
+   hypothesize(null = "independence") %>% #we are trying to determine independence
+   generate(reps = 1000, type = "permute") %>% #generates 10000 times randomizing categorical labels
+   calculate(stat = "diff in means") #finds difference in means
+
+p_val_sec <- tree_fit_sec %>%
+  filter(stat >= diff_mean13) %>% #checks how many stats are more extreme than the actual difference
+  summarise(p_value = n()/nrow(tree_fit_sec)) #calculates p-value
+```
+
+```{r}
+#| warning: false
+set.seed(144) #sets a seed
+
+#filters to only compare the first and fourth categories
+tree_income14 <- nyctrees %>%
+  filter(income_bracket == "$0-$54278" | income_bracket == "$84714-$250001")
+
+tree_fit_third <- tree_income14 %>%
+   specify(response = health_num, explanatory = income_bracket) %>% #defines explanatory and outcome variables
+   hypothesize(null = "independence") %>% #we are trying to determine independence
+   generate(reps = 1000, type = "permute") %>% #generates 10000 times randomizing categorical labels
+   calculate(stat = "diff in means") #finds difference in means
+
+p_val_third <- tree_fit_third %>%
+  filter(stat <= diff_mean14) %>% #checks how many stats are more extreme than the actual difference
+  summarise(p_value = n()/nrow(tree_fit_third)) #calculates p-value
+```
+
+We also created two linear regression models to see how the health of a tree is affected by income, the species of a tree (whether it was a London planetree, the most common species, or not), the number of signs of stewardship for the tree, the status of the sidewalk, and the kinds of guards present near the tree. This statistic method helps with our investigation by controlling for these variables. For the first regression, we used income as a categorical variable using the four different brackets. In the second regression, we used income as a continuous variable and accounted for the possibility of it being a curvilinear relationship by squaring the income.
+
+```{r}
+#| message: false
+
+#fits a linear model
+income_health_fit <- linear_reg() %>% 
+  set_engine("lm") %>%
+  fit(health_num ~ income_bracket + type + steward + sidewalk + guards, data = tree_income) #predicts health by average region income
+
+#tidies fitted model
+income_health <- income_health_fit %>% 
+  tidy()
+
+#prints nicely as a knitr table
+income_health %>%
+    knitr::kable(col.names = c("Term", "Estimate", "STD Error", "Statistic", "P-Value"))
+```
+
+```{r}
+intercept <- income_health$estimate[1] #store intercept and slope
+first <- income_health$estimate[2]
+second <- income_health$estimate[3] 
+third <- income_health$estimate[4]
+species <- income_health$estimate[5]
+steward12 <- income_health$estimate[6]
+steward34 <- income_health$estimate[7]
+steward4 <- income_health$estimate[8]
+sidewalkdamage <- income_health$estimate[9]
+guardsharmful <- income_health$estimate[10]
+guardsunsure <- income_health$estimate[11]
+guardshelp <- income_health$estimate[12]
+incomesq <- income_health$estimate[13]
+```
+
+The first linear model can be written out as follows:
+
+$\hat {health} = `r intercept` + `r first` \times income2 + `r second` \times income3 + `r third` \times income4 + `r species` \times species + `r steward12` \times steward1or2 + `r steward34` \times steward3or4 + `r steward4` \times steward4plus + `r sidewalkdamage` \times sidewalkdamage + `r guardsharmful` \times guardsharmful + `r guardsunsure` \times guardsunsure + `r guardshelp` \times guardshelpful$
+
+The created linear model above predicts the health score (1 for poor, 2 for fair, 3 for good) for a tree based on a multitude of factors. The intercept is `r intercept`, which means that if everything is kept at baseline (species is London planetree, median income of the neighborhood is \$0-54278, no stewardship for the tree, undamaged sidewalk, and no guards), the health score should be `r intercept`. There are also different coefficients for different income levels: if the income is \$54279-70793, it is `r first`; if \$70794-84713, it is `r second`; if \$84713 or greater, it is $`r third`$. The type coefficient, `r species`, is split into two categories: London planetree (0) or other species (1), which means it would be in use when the tree is not a London planetree. The steward coefficients are different for the different number of stewardship shown on each tree, so we can see that for the more stewardship shown on each tree, the healthier it tends to be, as the coefficient for 4 or more stewards, `r steward4`, is higher than that of 3/4 and 1/2. Furthermore, guards seem to beone of the most important in determining tree health. Having harmful guards harms the health of the tree, but helpful guards increases the health by `r guardshelp`.
+
+In our next regression model, we will be examining the effect of the raw income (in thousands of dollars) and the squared income to account for the potential curvilinear relationship.
+
+```{r}
+tree_income <- tree_income %>%
+  mutate(raw_rescaled = all_income/1000)
+
+income_rescale_health_fit <- linear_reg() %>% #fits a linear model
+  set_engine("lm") %>%
+  fit(health_num ~ raw_rescaled + type + steward + sidewalk + guards + income_rescale, data = tree_income) #defines controlled variables
+
+income_rescale_health <- income_rescale_health_fit%>% 
+  tidy() #tidies into a tibble
+
+#formats nicely using knitr
+knitr::kable(income_rescale_health, col.names = c("Term", "Estimate", "STD Error", "Statistic", "P-Value"))
+```
+
+```{r}
+intercept_rescale <- income_rescale_health$estimate[1] #store intercept and slope
+raw_rescale <- income_rescale_health$estimate[2]
+species_rescale <- income_rescale_health$estimate[3]
+steward12_rescale <- income_rescale_health$estimate[4]
+steward34_rescale <- income_rescale_health$estimate[5]
+steward4_rescale <- income_rescale_health$estimate[6]
+sidewalkdam_rescale <- income_rescale_health$estimate[7]
+guardsharmful_rescale <- income_rescale_health$estimate[8]
+guardsunsure_rescale <- income_rescale_health$estimate[9]
+guardshelp_rescale <- income_rescale_health$estimate[10]
+incomesq_rescale <- income_rescale_health$estimate[11]
+```
+
+The linear model can be written out as follows:
+
+$\hat {health} = `r intercept_rescale` + `r raw_rescale` \times income + `r species_rescale` \times species + `r steward12_rescale` \times steward1or2 + `r steward34_rescale` \times steward3or4 + `r steward4_rescale` \times steward4plus + `r sidewalkdam_rescale` \times sidewalkdamage + `r guardsharmful_rescale` \times guardsharmful + `r guardsunsure_rescale` \times guardsunsure + `r guardshelp_rescale` \times guardshelpful + `r incomesq_rescale` \times incomesq$
+
+The second model is similar to the first except for two variables. First, the income brackets have been replaced with a continuous variable of raw income, `raw_rescaled`, which has been divided by 1000 to make the model simpler. This variable has the coefficient of `r raw_rescale`. The second difference is the inclusion of the rescaled income variable squared to account for a curvilinear relationship. The variable is represented by `income_rescale`, and its coefficient is $`r incomesq_rescale`$.
+
+### Results
+
+```{r}
+#calculates adjusted r squared for each model
+income_health_adjr2 <- glance(income_health_fit)$adj.r.squared
+income_rescale_health_adjr2 <- glance(income_rescale_health_fit)$adj.r.squared
+```
+
+```{r}
+resid <- augment(income_health_fit$fit) %>% #residuals plot for categorical model
+  ggplot(i, mapping = aes(x = .fitted, y = .resid)) +
+  geom_point() +
+  geom_hline(yintercept = 0, color = "gray", lty = "dashed")
+
+resid2 <- augment(income_rescale_health_fit$fit) %>% #residuals plot for curvilinear model
+  ggplot(i2, mapping = aes(x = .fitted, y = .resid)) +
+  geom_point() +
+  geom_hline(yintercept = 0, color = "gray", lty = "dashed")
+```
+
+From our results, we can conclude that there is a small but not negligible impact of income on the health of trees in NYC. From the third visualization showing the relationship between income bracket and tree health, we can see a small increase of Good health trees in the first tree brackets, but with a fall in the last one. Thus, we visually see that the income variable does have an impact on health (outcome variable).
+
+Although visually the distribution of Poor, Fair, and Good health seem similar for each category, our summary statistics provide further evidence that there is a relationship between income and tree health. We calculated the difference in the means between the lowest income group and each of the higher income groups. We found that the second and third highest had an average tree health score of `r diff_mean12` and `r diff_mean13` higher than the lowest income group, but the highest income bracket had a mean tree health score of `r diff_mean14` lower. By simulating the null hypothesis and testing for independence, we found that there is an incredibly low probability that these differences are due to chance because the p-values were equal to `r p_val_first`, `r p_val_sec`, and `r p_val_third`. While this demonstrates a statistically significant relationship between income and tree health, the difference in means between the highest and lowest categories calls this positive correlation into question because the low income areas have better average tree health than the wealthy areas.
+
+With our regressions, we can understand the numerical impact of income on health level. With the first regression, `income_health`, we can see that when the income increases to the second bracket, the health score is `r first` higher than that of the first bracket. When it increases to the third bracket, the score is `r second` higher. But when the income bracket increases to the fourth bracket, the score is $`r third`$ lower. After accounting for other variables like species, guards and stewardship, the regression suggests that there may be a positive linear relationship between income and health, even though the coefficient became negative at the fourth bracket. This made us wonder if there was a curvilinear relationship instead.
+
+With our second regression, `income_rescale_health`, the income variable is continuous (we rescaled it to be divided by 1000 to make it simpler). We also included the square of the income to account for the possibility of it being a curvilinear relationship. In this model the coefficient for the income is `r raw_rescale` which shows that for every increase in \$1000, the health increases by that value. The trends remain similar for the other variables with slight changes in values. For the square of the income which accounts for the curvilinear relationship, the variable has a coefficient of $`r incomesq_rescale`$. The resulting model shows that for every increase in \$1000 for the income there is an effect of $`r raw_rescale` + `r incomesq_rescale` \times income + `r incomesq_rescale`$. Since $`r incomesq_rescale`$ is very close to zero it would suggest that the model is mostly linear.
+
+After comparing the $R^2$ value for the two regressions, we can see that the $R^2$ for the first regression, `r income_health_adjr2`, is greater than that of the second one, `r income_rescale_health_adjr2`. Unfortunately, since the $R^2$ value is so small, it means that only `r income_health_adjr2*100`% of the variance in the data is predicted by our first model. Interestingly, most of the p-values we received from the regression are close to 0. Since our p-values are mostly very close to 0, especially those of the first three income brackets, this means that we should reject our null hypothesis that the income variable does not affect the health outcome.
+
+However, outliers do exist: in our first regression, the variable for the highest income bracket and the variable for guards with unsure helpfulness are the only ones with p-values higher than 0.05. The p-value for the highest income bracket is `r income_health$p.value[4]`, which is extremely high, and the coefficient for this bracket is $`r third`$, which breaks the trend of the coefficients increasing as the income bracket increases. This suggests that there may be several outlier neighborhoods in the income bracket that have very unhealthy trees. With the unreliable coefficient for this income bracket, it suggests there is a chance that the trend of health becoming better as income increases still stands.
+
+Overall, we can not fully confirm our hypothesis because although there is an upwards trend for the most part, the highest income zip code regions consistently demonstrate that they have less healthy trees.
+
+### Discussion
+
+From our analysis, we learned that our research question is somewhat supported by the difference in means and p values calculated in our statistical arguments. There seems to be an increase, albeit slight, in the mean tree health for the first to the third income brackets in the regression which would suggest that the hypothesis where tree health gets better as the neighborhood's income increases is supported. The low p-values, the differences in mean, and the visualization of the relationship between the exploratory & outcome variables support this hypothesis as well. However, we come into problems when delving deeper into the values for each statistical model and what they mean.
+
+A major flaw in our model is the inability of our regression to predict accurate outcomes. Our $R^2$ for our `income_health` regression is `r income_health_adjr2`, which means only `r income_health_adjr2*100`% of the variance in the data is explained by our first model. This is highly inaccurate and suggests that a linear regression is not the best choice for the modeling.
+
+Both residual models from the two regressions have the same trends, and we will discuss them in general. The residuals models show a major flaw in our investigation: the dataset itself. Because the observations for health (the outcome variable) were separated into only three categories (Poor, Fair, and Good), the residual plot is also separated into three separate lines with similar negative slopes. The points in the residual plot fall into parallel slopes because as the fitted value increases, it becomes more different from the actual value in similar slopes for the trees with scores of 1 & 2 and closer for the trees of 3 points. For example, for the Good health trees, the higher the score gets (2.7 to 2.9), the closer the residual moves to 0, as the fitted value gets closer to the actual score 3. We can see a large flaw in our model in that the lowest fitted value goes to only 2.6, but the trees with Poor health have an actual score of 1 and trees with Fair health have an actual score of 2. This means that for all the trees whose actual values are 1, the model's predictions are all 1.7 to 1.9 points away. However, we could argue that this makes sense because we found the average health of trees in one area, and many more trees are observed having Good health compared to Fair and Poor, which raises the average score.
+
+This data set itself has many flaws which make this analysis difficult. In order to investigate this question more effectively in the future, we should try to find data with a more detailed scale to measure tree health so that the outcome variable has more than 3 possible values. Even with the results we have, it is hard to say that "one income group tends to have trees with scores `r diff_mean12` higher" means anything when in reality these trees are only categorized as Poor, Fair, or Good in the original data, not with detailed numeric scores. Additionally, this data is questionable because apparent health of a tree is subjective and vague, especially considering much of this data is collected by volunteers rather than professionals, and there is a great possibility for human error in how this tree data is collected.
+
+A major way we could improve on our models in a future investigation is to use an ordinal logistics regression. Even better, we could use a classification approach model which uses multiple predictors such as income, guards, stewardship, to predict the health of the tree. A classification model reads some input and generates an output that classifies the input into some category, which would be much more helpful because our outcome variable has only three categories. A linear regression is not a good way to predict the health of trees because there are so many factors involved. If we were to do the project over again, we would use these alternative methods. We would also try to have a clearer idea of what we were looking for and how we were planning to calculate it from the start.
+
+In conclusion, although we found some statistically significant results, they are not practically significant. There are too many issues with the data set and the statistical processing to claim a positive relationship between the variables with any level of certainty. Once the mentioned improvements to our analysis are put in place, it would be interesting to rerun these tests. We could also analyze different major cities and see if the results are consistent.
